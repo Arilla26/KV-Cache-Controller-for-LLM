@@ -58,7 +58,6 @@ This project implements a **set-associative, hardware-managed cache** that sits 
 | `random_lfsr.sv` | LFSR-based pseudo-random replacement (for comparison) |
 | `kv_delta_codec.sv` | BF16 storage codec — FP32→BF16 truncation, 2-stage pipeline |
 | `kv_cache_axi_wrapper.sv` | AXI4-Lite slave + AXI4-Full master interface |
-| `kv_dma_dispatcher.sv` | DMA command-queue dispatcher (latency-reduction extension) |
 
 ---
 
@@ -87,7 +86,7 @@ Hardware platform: **Arty Z7-20 (Xilinx Zynq-7020, XC7Z020)** at **50 MHz**.
 | Resource usage | ~25.3k LUTs (~48%) |
 | Compression | **2:1** (BF16), bounded error ≤ 2⁻⁷ |
 
-Latency analysis showed that the on-chip cache path is fast (60 ns), while most end-to-end wall-clock time came from the **AXI-Lite communication interface**, not the cache core — motivating the DMA command-queue extension (`kv_dma_dispatcher.sv`).
+Latency analysis showed that the on-chip cache path is fast (60 ns), while most end-to-end wall-clock time came from the **AXI bus communication interface**, not the cache core — pointing to the bus, not the cache logic, as the real bottleneck.
 
 ---
 
@@ -127,12 +126,12 @@ This project deliberately focuses on the **KV cache controller** in depth, rathe
 
 The main architectural consequence, worth stating plainly:
 
-- **The cache sits behind an AXI bus to the processing system**, so it currently behaves as a *managed on-chip buffer* rather than a cache on a compute datapath. A true cache must sit next to the compute engine and serve KV reads in a few cycles without bus overhead. This is also why the bus-mediated DMA path does not beat a direct-DDR baseline — every access pays a bus cost.
+- **The cache sits behind an AXI bus to the processing system**, so it currently behaves as a *managed on-chip buffer* rather than a cache on a compute datapath. A true cache must sit next to the compute engine and serve KV reads in a few cycles without bus overhead. This is also why the bus-mediated path does not beat a direct-DDR baseline — every access pays a bus cost.
 - **The natural completion** is to place an on-chip **attention engine (or a tightly-coupled processor)** directly beside the cache, reading KV from BRAM without crossing the bus. That turns this managed buffer into a cache in the strict sense, and is the clear next step.
 
 Other notes:
 - **Workload:** the access pattern is realistic (SnapKV on the Qwen2.5-0.5B topology) but KV *values* are synthetic; accuracy validation against a real inference run is future work.
-- **Latency vs. baseline:** the DMA path has not yet beaten a direct-DDR baseline; prefetching is a candidate improvement.
+- **Latency vs. baseline:** the bus-mediated path has not yet beaten a direct-DDR baseline; the real fix is removing the bus from the KV read path (see above), with prefetching as a smaller incremental improvement.
 
 ---
 
