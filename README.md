@@ -121,10 +121,17 @@ xsim sim -runall
 
 ---
 
-## Limitations & future work
+## Scope & limitations
 
-- **Architecture scope:** the cache communicates with the processing system over the AXI bus, so it behaves as a managed on-chip buffer rather than a cache sitting directly on a compute datapath. Integrating it alongside an on-chip attention engine (so KV is read directly without bus overhead) is the natural next step.
-- **Workload:** the access pattern is real (SnapKV on Qwen2.5-0.5B topology) but KV values are synthetic; accuracy validation against a real inference run is future work.
+This project deliberately focuses on the **KV cache controller** in depth, rather than a full inference accelerator. As a solo capstone, the scope was scoped down (by the advisor) to one well-engineered subsystem instead of a shallow end-to-end system — so the cache datapath, replacement policies, codec, and timing are taken to completion and measured rigorously.
+
+The main architectural consequence, worth stating plainly:
+
+- **The cache sits behind an AXI bus to the processing system**, so it currently behaves as a *managed on-chip buffer* rather than a cache on a compute datapath. A true cache must sit next to the compute engine and serve KV reads in a few cycles without bus overhead. This is also why the bus-mediated DMA path does not beat a direct-DDR baseline — every access pays a bus cost.
+- **The natural completion** is to place an on-chip **attention engine (or a tightly-coupled processor)** directly beside the cache, reading KV from BRAM without crossing the bus. That turns this managed buffer into a cache in the strict sense, and is the clear next step.
+
+Other notes:
+- **Workload:** the access pattern is realistic (SnapKV on the Qwen2.5-0.5B topology) but KV *values* are synthetic; accuracy validation against a real inference run is future work.
 - **Latency vs. baseline:** the DMA path has not yet beaten a direct-DDR baseline; prefetching is a candidate improvement.
 
 ---
