@@ -36,16 +36,13 @@ Header (32 bytes):
 
 import struct
 import numpy as np
+import json
 import os
 import sys
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants
+# Fixed format constants (binary layout — not configurable)
 # ─────────────────────────────────────────────────────────────────────────────
-NUM_LAYERS   = 24
-NUM_KV_HEADS = 2
-MASTER_SEED  = 0xDEADBEEF
-
 STRUCT_FMT  = "<BBHHIIIIi"   # NOTE: last field unused, keep layout
 STRUCT_SIZE = 26             # bytes (packed: 1+1+2+2+4+4+4+4+4 = 26)
 HEADER_SIZE = 32
@@ -53,38 +50,104 @@ HEADER_MAGIC = b"KVCACHE1"
 
 PATTERN_SNAPKV = 0
 
+DEFAULT_CONFIG = "trace_config.json"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Trace configurations
+# Configuration loading
+#
+# Model topology and trace parameters live in an external JSON file, so a
+# benchmark configuration can be changed without editing this script.
 # ─────────────────────────────────────────────────────────────────────────────
-TRACES = [
-    dict(
-        name        = "S",
-        filename    = "traces.bin",
-        prefill     = 32,
-        decode      = 32,
-        window      = 8,
-        topk        = 8,
-        description = "Small — verify correctness, >95% expected hit",
-    ),
-    dict(
-        name        = "M",
-        filename    = "tracem.bin",
-        prefill     = 256,
-        decode      = 64,
-        window      = 16,
-        topk        = 16,
-        description = "Medium — meaningful benchmark, 50-80% expected hit",
-    ),
-    dict(
-        name        = "L",
-        filename    = "tracel.bin",
-        prefill     = 512,
-        decode      = 128,
-        window      = 32,
-        topk        = 32,
-        description = "Large — stress test, 30-60% expected hit",
-    ),
-]
+MODEL_REQUIRED = ("num_layers", "num_kv_heads", "master_seed")
+TRACE_REQUIRED = ("name", "filename", "prefill", "decode", "window", "topk")
+
+
+def _as_int(value, field):
+    """Accept both 48879 and "0xBEEF" for integer fields."""
+    if isinstance(value, bool):
+        raise ValueError(f"field '{field}' must be an integer, got a boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            pass
+    raise ValueError(f"field '{field}' must be an integer, got {value!r}")
+
+
+def load_config(path=DEFAULT_CONFIG):
+    """
+    Read the benchmark configuration from a JSON file.
+
+    Returns (model, traces): model holds the topology parameters, traces is a
+    list of per-trace parameter dicts. Exits with a readable message if the
+    file is missing or malformed, rather than failing on a KeyError halfway
+    through generation.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"ERROR: config file not found: {path}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"ERROR: {path} is not valid JSON — {e}")
+
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"ERROR: {path} must hold a JSON object at the top level")
+
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        raise SystemExit(f"ERROR: {path} is missing a 'model' object")
+    missing = [k for k in MODEL_REQUIRED if k not in model]
+    if missing:
+        raise SystemExit(f"ERROR: 'model' is missing field(s): {', '.join(missing)}")
+
+    try:
+        model = dict(
+            num_layers   = _as_int(model["num_layers"],   "model.num_layers"),
+            num_kv_heads = _as_int(model["num_kv_heads"], "model.num_kv_heads"),
+            master_seed  = _as_int(model["master_seed"],  "model.master_seed"),
+            name         = str(model.get("name", "unnamed model")),
+        )
+    except ValueError as e:
+        raise SystemExit(f"ERROR: {e}")
+
+    traces = cfg.get("traces")
+    if not isinstance(traces, list) or not traces:
+        raise SystemExit(f"ERROR: {path} must define a non-empty 'traces' list")
+
+    parsed = []
+    for i, tr in enumerate(traces):
+        if not isinstance(tr, dict):
+            raise SystemExit(f"ERROR: traces[{i}] must be an object")
+        missing = [k for k in TRACE_REQUIRED if k not in tr]
+        if missing:
+            label = tr.get("name", f"index {i}")
+            raise SystemExit(f"ERROR: trace '{label}' is missing field(s): "
+                             f"{', '.join(missing)}")
+        try:
+            parsed.append(dict(
+                name        = str(tr["name"]),
+                filename    = str(tr["filename"]),
+                prefill     = _as_int(tr["prefill"], f"traces[{i}].prefill"),
+                decode      = _as_int(tr["decode"],  f"traces[{i}].decode"),
+                window      = _as_int(tr["window"],  f"traces[{i}].window"),
+                topk        = _as_int(tr["topk"],    f"traces[{i}].topk"),
+                description = str(tr.get("description", "")),
+            ))
+        except ValueError as e:
+            raise SystemExit(f"ERROR: {e}")
+
+    return model, parsed
+
+
+# Populated by main() from the JSON config before any trace is generated.
+NUM_LAYERS   = None
+NUM_KV_HEADS = None
+MASTER_SEED  = None
+MODEL_NAME   = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,17 +528,30 @@ def verify_trace(path):
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    out_dir = "." if len(sys.argv) < 2 else sys.argv[1]
+    global NUM_LAYERS, NUM_KV_HEADS, MASTER_SEED, MODEL_NAME
+
+    # Usage: generate_trace.py [config.json] [output_dir]
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG
+    out_dir  = sys.argv[2] if len(sys.argv) > 2 else "."
+
+    model, traces = load_config(cfg_path)
+    NUM_LAYERS   = model["num_layers"]
+    NUM_KV_HEADS = model["num_kv_heads"]
+    MASTER_SEED  = model["master_seed"]
+    MODEL_NAME   = model["name"]
+
     os.makedirs(out_dir, exist_ok=True)
 
     print("SnapKV Sparse Attention Trace Generator")
+    print(f"Config file      : {os.path.abspath(cfg_path)}")
     print(f"Output directory : {os.path.abspath(out_dir)}")
-    print(f"Model            : Qwen2.5-0.5B (synthetic, seed=0x{MASTER_SEED:08X})")
+    print(f"Model            : {MODEL_NAME} (synthetic, seed=0x{MASTER_SEED:08X})")
     print(f"Layers           : {NUM_LAYERS}, KV heads: {NUM_KV_HEADS}")
     print(f"Pattern          : SnapKV (sink + local window + top-K)")
+    print(f"Traces           : {', '.join(t['name'] for t in traces)}")
 
     generated = []
-    for cfg in TRACES:
+    for cfg in traces:
         path = generate_trace(cfg, out_dir)
         generated.append(path)
 
@@ -492,7 +568,8 @@ def main():
         size = os.path.getsize(path)
         print(f"  {os.path.basename(path):20s}  {size:>10,} bytes  ({size/1024:.1f} KB)")
 
-    print(f"\nDone. Copy trace_s.bin / trace_m.bin / trace_l.bin to SD card.")
+    names = " / ".join(os.path.basename(p) for p in generated)
+    print(f"\nDone. Copy {names} to SD card.")
     print("Update sd_load.h and main.c to select which trace to load.")
 
 

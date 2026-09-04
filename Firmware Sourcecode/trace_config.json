@@ -1,0 +1,37 @@
+{
+  "model": {
+    "name": "Qwen2.5-0.5B",
+    "num_layers": 24,
+    "num_kv_heads": 2,
+    "master_seed": "0xDEADBEEF"
+  },
+  "traces": [
+    {
+      "name": "S",
+      "filename": "trace_s.bin",
+      "prefill": 32,
+      "decode": 32,
+      "window": 8,
+      "topk": 8,
+      "description": "Small - verify correctness, >95% expected hit"
+    },
+    {
+      "name": "M",
+      "filename": "trace_m.bin",
+      "prefill": 256,
+      "decode": 64,
+      "window": 16,
+      "topk": 16,
+      "description": "Medium - meaningful benchmark, 50-80% expected hit"
+    },
+    {
+      "name": "L",
+      "filename": "trace_l.bin",
+      "prefill": 512,
+      "decode": 128,
+      "window": 32,
+      "topk": 32,
+      "description": "Large - stress test, 30-60% expected hit"
+    }
+  ]
+}
