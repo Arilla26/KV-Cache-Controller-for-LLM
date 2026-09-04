@@ -116,14 +116,14 @@ The correct fix is therefore DMA or an interrupt-driven handshake rather than a 
 .
 ├── SystemVerilog Sourcecode/   # RTL design — 7 core modules (cache, FSM, PLRU, codec, AXI)
 ├── Testbench/                  # 4 testbenches + sample trace (see Testbench/README.md)
-├── Firmware Sourcecode/        # Bare-metal C firmware (PS-side control, benchmarks)
+├── Firmware Sourcecode/        # Bare-metal C firmware + Python trace generator
 ├── Vivado RPT File/            # Synthesis & implementation reports (timing, utilization)
 └── README.md
 ```
 
 - **[SystemVerilog Sourcecode](SystemVerilog%20Sourcecode)** — the hardware design: cache datapath, 11-state controller FSM, Tree-PLRU/FIFO/LFSR replacement, BF16 codec, and AXI4-Lite/Full interfaces.
 - **[Testbench](Testbench)** — verification: one self-checking testbench for the hardware counters, one cycle-accurate latency measurement, one trace-driven performance harness, and one directed corner-case test.
-- **[Firmware Sourcecode](Firmware%20Sourcecode)** — bare-metal C running on the Cortex-A9 (PS) to configure the cache via memory-mapped registers and drive benchmarks.
+- **[Firmware Sourcecode](Firmware%20Sourcecode)** — bare-metal C running on the Cortex-A9 (PS) to configure the cache via memory-mapped registers and drive benchmarks, plus `trace_generate.py` and its `trace_config.json` for producing the benchmark traces.
 - **[Vivado RPT File](Vivado%20RPT%20File)** — post-implementation reports documenting timing closure (WNS), resource utilization, and the critical-path analysis.
 
 ---
@@ -147,6 +147,48 @@ Details, including how to run each one, are in **[Testbench/README.md](Testbench
 Beyond simulation, the design was verified against a **Python golden reference
 model** that computes the expected output independently, and finally in
 hardware-in-the-loop: 430,080 operations on the board with zero timeouts.
+
+---
+
+## Generating the benchmark traces
+
+The traces the firmware replays are produced by `trace_generate.py`. Model
+topology and per-trace parameters live in `trace_config.json`, so a benchmark
+configuration can be changed without editing the script:
+
+```json
+{
+  "model": {
+    "name": "Qwen2.5-0.5B",
+    "num_layers": 24,
+    "num_kv_heads": 2,
+    "master_seed": "0xDEADBEEF"
+  },
+  "traces": [
+    { "name": "M", "filename": "trace_m.bin",
+      "prefill": 256, "decode": 64, "window": 16, "topk": 16 }
+  ]
+}
+```
+
+```bash
+cd "Firmware Sourcecode"
+python3 trace_generate.py                          # uses trace_config.json
+python3 trace_generate.py trace_config.json out/   # explicit config and output dir
+```
+
+The generator writes `trace_s.bin`, `trace_m.bin` and `trace_l.bin` (32-byte
+header + 26-byte packed entries), verifies the magic number of each, and prints
+the expected hit ratio per trace. Copy the files to the root of the SD card;
+`sd_load.h` selects which one the firmware loads.
+
+The seed is fixed, so a given config always produces byte-identical traces —
+two benchmark runs differ only in the hardware configuration under test, never
+in the stimulus. Malformed or incomplete configs are reported with a specific
+message rather than failing partway through generation.
+
+Binary layout constants (struct size, header magic) stay in the script: they
+describe the file format the firmware parses, not something a user should tune.
 
 ---
 
@@ -186,7 +228,7 @@ Other notes:
 
 ## Tech stack
 
-`SystemVerilog` · `C (bare-metal)` · `Xilinx Vivado/Vitis 2025.2` · `Zynq-7020 (Arty Z7-20)` · `AXI4-Lite / AXI4-Full` · `Python` (golden model)
+`SystemVerilog` · `C (bare-metal)` · `Xilinx Vivado/Vitis 2025.2` · `Zynq-7020 (Arty Z7-20)` · `AXI4-Lite / AXI4-Full` · `Python` (golden model, trace generation, JSON config)
 
 ---
 
